@@ -1,0 +1,307 @@
+#include <iostream>
+#include <list>
+#include <fstream>
+#include <map>
+#include <vector>
+#include <algorithm>
+
+
+using namespace std;
+
+struct SymbolInfo 
+{
+    char symbol;
+    int frequency, lowerBound, upperBound;
+};
+
+struct FrequencyComparison 
+{
+    bool operator() (SymbolInfo l, SymbolInfo r) 
+    {
+        return l.frequency > r.frequency;
+    }
+};
+
+void updateBounds(list<SymbolInfo>& frequencyList, list<SymbolInfo>::iterator& currentSymbol, list<SymbolInfo>::iterator& previousSymbol) 
+{
+    previousSymbol = currentSymbol;
+    currentSymbol++;
+
+    for(; currentSymbol != frequencyList.end(); currentSymbol++)
+    {
+        currentSymbol->lowerBound = previousSymbol->upperBound;
+        currentSymbol->upperBound = currentSymbol->lowerBound + currentSymbol->frequency;
+        previousSymbol++;
+    }
+}
+
+void fillSymbolList(const map<char, int>& symbolFrequencies, list<SymbolInfo>& frequencyList) 
+{
+    for (map<char, int>::const_iterator Iterator = symbolFrequencies.begin(); Iterator != symbolFrequencies.end(); Iterator++) 
+    {
+        SymbolInfo symbolData;
+        symbolData.symbol = Iterator->first;
+        symbolData.frequency = Iterator->second;
+        frequencyList.push_back(symbolData);
+    }
+
+    frequencyList.sort(FrequencyComparison());
+}
+
+double encode(ifstream& f, ofstream& g)
+{
+    if (!f.is_open()) 
+    {
+        cout << "Error opening input file!" << endl;
+        return 0.0;
+    }
+
+    int count = 0;
+    map <char, int> symbolFrequencies;
+    map <char, int> ::iterator Iterator;
+    list<SymbolInfo> frequencyList;
+
+    while(!f.eof()) 
+    {
+        char currentSymbol = f.get();
+        symbolFrequencies[currentSymbol]++;
+        count++;
+    }
+
+    fillSymbolList(symbolFrequencies, frequencyList); 
+
+    frequencyList.begin()-> upperBound=frequencyList.begin()->frequency;
+    frequencyList.begin()->lowerBound=0;
+
+    list<SymbolInfo>::iterator currentSymbol = frequencyList.begin();
+    list<SymbolInfo>::iterator previousSymbol = frequencyList.begin();
+
+    updateBounds(frequencyList, currentSymbol, previousSymbol);
+    int bits=0;
+
+    for (Iterator = symbolFrequencies.begin(); Iterator != symbolFrequencies.end(); Iterator++) 
+        if (Iterator->second != 0) 
+            bits += 40;
+
+    g.write((char*)(&bits), sizeof(bits));
+
+    for (int i=0; i<256; i++) 
+    {
+        if (symbolFrequencies[char(i)]>0) 
+        {
+            char curSymbol = char(i);
+            g.write((char*)(&curSymbol), sizeof(curSymbol));
+            g.write((char*)(&symbolFrequencies[char(i)]), sizeof(symbolFrequencies[char(i)]));
+        }
+    }
+
+    f.clear();
+    f.seekg(0);
+
+    int lowBound=0, upBound=65535, divisor =0, intervalDenominator=frequencyList.back().upperBound, firstQuarter=(upBound+1)/4, Half=firstQuarter*2, thirdQuarter=firstQuarter*3, bits_to_follow=0;
+    char Byte=0;
+    count=0;
+
+    while(!f.eof()) 
+    {
+        char curSymbol =f.get(); divisor++;
+        for(currentSymbol=frequencyList.begin(); currentSymbol!=frequencyList.end(); currentSymbol++) 
+        {
+            if(curSymbol==currentSymbol->symbol) break;
+        }
+
+        if(curSymbol!=currentSymbol->symbol) 
+        {
+            cout<<"Error!"<<endl;
+            break;
+        }
+
+        int prevLowBound=lowBound;
+        lowBound=lowBound+currentSymbol->lowerBound*(upBound-lowBound+1)/intervalDenominator;
+        upBound= prevLowBound+currentSymbol-> upperBound*(upBound- prevLowBound+1)/intervalDenominator-1;
+
+        while(true)
+        {
+            if(upBound<Half) 
+            {
+                count++;
+
+                if(count==8) 
+                {
+                    count = 0;
+                    g << Byte;
+                    Byte = 0;
+                }
+
+                for(; bits_to_follow>0; bits_to_follow--) 
+                {
+                    Byte =Byte | (1<<(7-count));
+                    count++;
+
+                    if(count==8) 
+                    {
+                        count = 0;
+                        g << Byte;
+                        Byte = 0;
+                    }
+                }
+            }
+
+            else if(lowBound>=Half) 
+            {
+                Byte=Byte | (1<<(7-count));
+                count++;
+
+                if(count==8) 
+                {
+                    count = 0;
+                    g << Byte;
+                    Byte = 0;
+                }
+
+                for(; bits_to_follow>0; bits_to_follow--) 
+                {
+                    count++;
+                    if(count==8) 
+                    {
+                        count = 0;
+                        g << Byte;
+                        Byte = 0;
+                    }
+                }
+
+                lowBound-=Half;
+                upBound-=Half;
+            }
+
+            else if((lowBound>=firstQuarter) && (upBound<thirdQuarter)) 
+            {
+                bits_to_follow++;
+                lowBound-=firstQuarter;
+                upBound-=firstQuarter;
+            }
+            else break;
+
+            lowBound+=lowBound;
+            upBound+=upBound+1;
+        }
+    }
+    g<<Byte;
+
+    f.clear();
+    f.seekg(0, std::ios::end);
+    g.seekp(0, std::ios::end);
+
+    double sizeF = f.tellg();
+    double sizeG = g.tellp();
+
+    f.close();
+    g.close();
+    return sizeG / sizeF;
+}
+
+bool decode(ifstream& fg, ofstream& gf)
+{
+    if (!fg.is_open()) 
+    {
+        cout << "Error opening input file for decoding!" << endl;
+        return false;
+    }
+    int count = 0, bitsReserved, frequencyBits;
+    char sym;
+
+    map<char, int> symbolFrequencies;
+    map <char, int> ::iterator Iterator;
+    list<SymbolInfo> frequencyList;
+
+    fg.read((char*)&bitsReserved, sizeof(bitsReserved));
+    while (bitsReserved>0) 
+    {
+        fg.read((char*)&sym, sizeof(sym));
+        fg.read((char*)&frequencyBits, sizeof(frequencyBits));
+        bitsReserved-=40;
+        symbolFrequencies[sym]=frequencyBits;
+    }
+
+    fillSymbolList(symbolFrequencies, frequencyList);
+
+    frequencyList.begin()-> upperBound=frequencyList.begin()->frequency;
+    frequencyList.begin()->lowerBound=0;
+
+    list<SymbolInfo>::iterator currentSymbol = frequencyList.begin();
+    list<SymbolInfo>::iterator previousSymbol = frequencyList.begin();
+
+    updateBounds(frequencyList, currentSymbol, previousSymbol);
+    
+    count=0;
+    int lowBound=0, upBound=65535, intervalDenominator=frequencyList.back().upperBound, firstQuarter=(upBound+1)/4, Half=firstQuarter*2, thirdQuarter=firstQuarter*3, value=(fg.get()<<8) | fg.get();
+    char symbl=fg.get();
+
+    while(!fg.eof()) 
+    {
+        int calFreq = ((value - lowBound + 1) * intervalDenominator - 1) / (upBound - lowBound + 1);
+        for (currentSymbol = frequencyList.begin(); currentSymbol-> upperBound <= calFreq; currentSymbol++);
+        int prevLowBound = lowBound;
+        lowBound = lowBound + (currentSymbol->lowerBound) * (upBound - lowBound + 1) / intervalDenominator;
+        upBound = prevLowBound + (currentSymbol-> upperBound) * (upBound - prevLowBound + 1) / intervalDenominator - 1;
+
+        while(true)
+        {
+            if (upBound < Half);
+            else if (lowBound >= Half) 
+            {
+                lowBound -= Half;
+                upBound -= Half;
+                value -= Half;
+            }
+
+            else if ((lowBound >= firstQuarter) && (upBound < thirdQuarter)) 
+            {
+                lowBound -= firstQuarter;
+                upBound -= firstQuarter;
+                value -= firstQuarter;
+            }
+
+            else break;
+
+            lowBound += lowBound;
+            upBound += upBound + 1;
+            value += value + (((short) symbl >> (7 - count)) & 1);
+            count++;
+
+            if (count == 8) 
+            {
+                symbl = fg.get();
+                count = 0;
+            }
+        }
+
+        gf << currentSymbol->symbol;
+    }
+
+    fg.close();
+    gf.close();
+    return true;
+}
+
+int main() 
+{
+    ifstream f("text.txt", ios::out | ios::binary);
+    ofstream g("code.txt", ios::out | ios::binary);
+    
+    double compressionRatio = encode(f, g);
+    cout << "Compression ratio: " << compressionRatio << endl;
+    
+    ifstream fg("code.txt", ios::out | ios::binary);
+    ofstream gf("output2.txt", ios::out | ios::binary);
+
+    if (decode(fg, gf))
+        cout << "Decoding successful." << endl;
+    else
+        cout << "Decoding failed." << endl;
+
+    fg.close();
+    gf.close();
+
+    return 0;
+}    
